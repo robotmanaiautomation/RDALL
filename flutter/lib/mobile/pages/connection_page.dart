@@ -17,6 +17,7 @@ import '../../consts.dart';
 import '../../models/model.dart';
 import '../../models/platform_model.dart';
 import 'home_page.dart';
+import '../widgets/saved_tailscale_hosts.dart';
 
 /// Connection page for connecting to a remote peer.
 class ConnectionPage extends StatefulWidget implements PageShape {
@@ -87,6 +88,15 @@ class _ConnectionPageState extends State<ConnectionPage> {
           if (!bind.isCustomClient() && !isIOS)
             Obx(() => _buildUpdateUI(stateGlobal.updateUrl.value)),
           _buildRemoteIDTextField(),
+          if (isAndroid)
+            SavedTailscaleHosts(
+              readHosts: () =>
+                  bind.mainGetLocalOption(key: kRdallSavedTailscaleHosts),
+              writeHosts: (value) => bind.mainSetLocalOption(
+                  key: kRdallSavedTailscaleHosts, value: value),
+              initialAddress: () => _idController.id,
+              onConnect: (address) => connect(context, address),
+            ),
         ])),
         SliverFillRemaining(
           hasScrollBody: true,

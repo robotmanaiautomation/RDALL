@@ -22,3 +22,19 @@ jobs:
           /tmp/rdall-diagnostics-tests
       - name: Test log analysis
         run: python3 -m unittest discover -s tools/rdall -p 'test_*.py'
+
+  saved-tailscale-hosts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2
+        with:
+          flutter-version: '3.24.5'
+          channel: stable
+          cache: true
+      - name: Test saved Tailscale devices
+        working-directory: flutter
+        run: flutter test test/saved_tailscale_hosts_test.dart
+      - name: Analyze saved Tailscale devices
+        working-directory: flutter
+        run: dart analyze lib/mobile/widgets/saved_tailscale_hosts.dart test/saved_tailscale_hosts_test.dart

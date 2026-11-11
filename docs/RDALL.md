@@ -78,6 +78,28 @@ python3 tools/rdall/analyze_connection.py /tmp/rdall-logcat.txt > /tmp/rdall-rep
 원본 RustDesk 로그나 전체 logcat에는 별도 정보가 있을 수 있으므로 공유용으로는
 분석기 결과를 사용한다.
 
+## Tailscale 주소 저장
+
+Android 연결 화면의 **저장한 Tailscale 기기 → +**에서 기기 이름과 주소를 입력한다.
+목록의 기기를 누르면 기존 직접 IP 접속 경로로 연결한다. 오른쪽 메뉴에서 수정·삭제한다.
+연결하지 않아도 저장되며 앱을 다시 열어도 유지된다. 입력창에 유효한 주소가 있으면
+추가 대화상자에 미리 채운다.
+
+- IPv4: `100.90.80.70` 또는 `100.90.80.70:21118`
+- 전체 MagicDNS 이름: `my-mac.tailnet.ts.net` 또는 `my-mac.tailnet.ts.net:21118`
+- 포트 생략 시 `21118`. 포트 범위는 `1–65535`.
+- 짧은 기기 이름(`my-mac`)과 IPv6는 이 저장 UI에서 지원하지 않는다.
+  기존 RustDesk 직접 접속 판별과 맞는 주소만 저장하기 위한 초기 지원 범위다.
+- 이름과 주소는 기존 로컬 설정의 `rdall-saved-tailscale-hosts` 키에 JSON으로 저장한다.
+  암호나 Tailscale 계정은 저장하지 않는다. 중복 주소와 잘못된 주소는 저장을 거부한다.
+- 양쪽 기기의 Tailscale 연결과 맥 RustDesk의 직접 IP 접근 허용은 별도로 필요하다.
+
+검증: `flutter test test/saved_tailscale_hosts_test.dart`의 UI 테스트 3개로
+저장 후 화면 재생성·접속, MagicDNS 수정·삭제, 잘못된/중복 주소 거부를 확인한다.
+기존 코드의 실행 경로 변경은 `connection_page.dart`의 Android 연결 화면에
+독립적인 목록 위젯을 추가하는 부분뿐이다. 저장은 기존 로컬 설정 API,
+접속은 기존 `connect(context, address)`를 사용한다. 별도 FFI나 전송 프로토콜은 추가하지 않는다.
+
 ## 검증
 
 네이티브 코덱/Flutter SDK 없이 진단 로직과 분석기를 검증할 수 있다.
@@ -97,8 +119,10 @@ Flutter 브리지 생성, Android NDK, vcpkg 네이티브 코덱 의존성이 �
 변경한 Rust 연결 코드의 구문 파싱, Android XML 파싱 및 `git diff --check`도 통과했다.
 `cargo check --lib --features flutter`는 의존성 다운로드 후
 `libs/scrap/build.rs`에서 `/opt/homebrew/Cellar/libyuv` 부재로 중단됐다.
-현재 환경에는 Flutter SDK와 생성된 Flutter/Rust 브리지도 없다.
+초기 시점에는 Flutter SDK와 생성된 Flutter/Rust 브리지도 없었다.
 전체 앱 컴파일, APK 실행, 실제 맥 연결/4G 성능은 아직 검증하지 않았다.
+주소 저장 기능 작업 중 로컬 Flutter 3.24.5 SDK를 준비했고 해당 기능의
+Flutter 위젯 테스트와 정적 분석을 실행했다. 전체 앱 빌드 검증과는 별개다.
 
 실기기 수용 기준: 같은 맥에 같은 1080p 설정으로 Wi-Fi와 4G 연결을 각각 실행해
 첫 영상/첫 UI 전달 시간, 선택 경로, 코덱, 큐 넘침, 디코딩 시간을 비교한다.
