@@ -115,14 +115,13 @@ python3 -m unittest discover -s tools/rdall -p 'test_*.py'
 `.github/workflows/flutter-build.yml` Android 작업과 `flutter/ndk_arm64.sh`를 기준으로 한다.
 Flutter 브리지 생성, Android NDK, vcpkg 네이티브 코덱 의존성이 필요하다.
 
-2026-11-11 초기 검증: Rust 진단 테스트 5개, Python 분석기 테스트 4개 통과.
-변경한 Rust 연결 코드의 구문 파싱, Android XML 파싱 및 `git diff --check`도 통과했다.
-`cargo check --lib --features flutter`는 의존성 다운로드 후
-`libs/scrap/build.rs`에서 `/opt/homebrew/Cellar/libyuv` 부재로 중단됐다.
-초기 시점에는 Flutter SDK와 생성된 Flutter/Rust 브리지도 없었다.
-전체 앱 컴파일, APK 실행, 실제 맥 연결/4G 성능은 아직 검증하지 않았다.
-주소 저장 기능 작업 중 로컬 Flutter 3.24.5 SDK를 준비했고 해당 기능의
-Flutter 위젯 테스트와 정적 분석을 실행했다. 전체 앱 빌드 검증과는 별개다.
+2026-11-12 검증 완료: Rust 진단 테스트 5개, Python 분석기 테스트 4개,
+Flutter 위젯 테스트 3개 및 해당 Dart 정적 분석 통과. GitHub Actions에서
+ARM64 디버그 APK를 빌드하고 Pixel9_Pro ARM64 / Android 14(API 34)
+에뮬레이터에 설치해 실행했다. 주소 추가·수정·삭제, 강제 종료 후 저장 유지,
+잘못된 포트·중복 주소 거부, 시험용 TCP 서버를 통한 실제 네이티브 진단 로그를 확인했다.
+실제 Mac 영상 연결과 Tailscale/4G 성능은 아직 검증하지 않았다.
+상세 결과와 APK 식별 정보는 [Android 검증 기록](RDALL-android-validation.md)을 참고한다.
 
 실기기 수용 기준: 같은 맥에 같은 1080p 설정으로 Wi-Fi와 4G 연결을 각각 실행해
 첫 영상/첫 UI 전달 시간, 선택 경로, 코덱, 큐 넘침, 디코딩 시간을 비교한다.
