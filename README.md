@@ -1,3 +1,10 @@
+# RDALL — 리데탑
+
+Personal RustDesk fork, starting with Android → macOS connection diagnostics.
+See [RDALL project notes](docs/RDALL.md) for logging, analysis and validation.
+
+The original RustDesk documentation and attribution follow.
+
 <p align="center">
   <img src="res/logo-header.svg" alt="RustDesk - Your remote desktop"><br>
   <a href="#raw-steps-to-build">Build</a> •

@@ -70,6 +70,10 @@ impl DocumentWriter {
 
 impl LogWriter for DocumentWriter {
     fn write(&self, now: &mut DeferredNow, record: &Record) -> io::Result<()> {
+        // Keep RDALL diagnostics available through adb in release builds as well.
+        if record.target() == "rdall" {
+            logcat().log(record);
+        }
         // JNI logs while detaching threads; calling back into JNI there is unsafe.
         if record.target() == "jni" || record.target().starts_with("jni::") {
             logcat().log(record);

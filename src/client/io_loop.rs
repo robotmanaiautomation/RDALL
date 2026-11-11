@@ -60,6 +60,7 @@ use hbb_common::{
 #[cfg(any(target_os = "windows", feature = "unix-file-copy-paste"))]
 use hbb_common::{tokio::sync::Mutex as TokioMutex, ResultType};
 use scrap::CodecFormat;
+use super::diagnostics::{ConnectionDiagnostics, Phase};
 use std::{
     collections::{HashMap, HashSet},
     ffi::c_void,
@@ -104,6 +105,7 @@ pub struct Remote<T: InvokeUiSession> {
     sent_close_reason: bool,
     cursor_dedupe: CursorDedupe,
     trusted_device: crate::trusted_devices::client::Session,
+    diagnostics: ConnectionDiagnostics,
 }
 
 #[derive(Default)]
@@ -158,10 +160,32 @@ impl<T: InvokeUiSession> Remote<T> {
             sent_close_reason: false,
             cursor_dedupe: Default::default(),
             trusted_device: Default::default(),
+            diagnostics: ConnectionDiagnostics::new(|line| log::info!(target: "rdall", "{}", line)),
         }
     }
 
     pub async fn io_loop(&mut self, key: &str, token: &str, round: u32) {
+        let diagnostics = self.diagnostics.clone();
+        let watchdog = tokio::spawn(async move {
+            let mut timer = time::interval(Duration::from_secs(5));
+            loop {
+                timer.tick().await;
+                diagnostics.report();
+            }
+        });
+        // Covers early returns and cancellation, not just successful loop exits.
+        let diagnostics = self.diagnostics.clone();
+        let _diagnostic_guard = crate::SimpleCallOnReturn {
+            b: true,
+            f: Box::new(move || {
+                watchdog.abort();
+                diagnostics.finish();
+            }),
+        };
+        self.diagnostics.event(
+            "connection_requested",
+            &format!(",\"round\":{},\"desktop\":{}", round, self.handler.is_default()),
+        );
         #[cfg(target_os = "windows")]
         let _file_clip_context_holder = {
             // `is_port_forward()` will not reach here, but we still check it for clarity.
@@ -201,10 +225,19 @@ impl<T: InvokeUiSession> Remote<T> {
             token,
             conn_type,
             self.handler.clone(),
+            self.diagnostics.clone(),
         )
         .await
         {
             Ok(((mut peer, direct, pk, kcp, stream_type), (feedback, rendezvous_server))) => {
+                self.diagnostics.advance(Phase::Authentication);
+                self.diagnostics.event(
+                    "transport_ready",
+                    &format!(
+                        ",\"direct\":{},\"transport\":\"{}\",\"secured\":{}",
+                        direct, stream_type, peer.is_secured()
+                    ),
+                );
                 self.handler
                     .connection_round_state
                     .lock()
@@ -222,6 +255,7 @@ impl<T: InvokeUiSession> Remote<T> {
                         self.handler.lc.write().unwrap().enable_trusted_devices = false;
                     }
                     Err(error) => {
+                        self.diagnostics.event("trust_validation_failed", "");
                         self.handler.on_error(&error.to_string());
                         self.handle_disconnected(round);
                         return;
@@ -296,10 +330,12 @@ impl<T: InvokeUiSession> Remote<T> {
                             if let Some(res) = res {
                                 match res {
                                     Err(err) => {
+                                        self.diagnostics.event("stream_read_failed", "");
                                         self.handler.on_establish_connection_error(err.to_string());
                                         break;
                                     }
                                     Ok(ref bytes) => {
+                                        self.diagnostics.received(bytes.len());
                                         last_recv_time = Instant::now();
                                         if !received {
                                             received = true;
@@ -312,6 +348,7 @@ impl<T: InvokeUiSession> Remote<T> {
                                     }
                                 }
                             } else {
+                                self.diagnostics.event("peer_stream_closed", "");
                                 if self.handler.is_restarting_remote_device() {
                                     log::info!("Restart remote device");
                                     self.handler.msgbox("restarting", "Restarting remote device", "Connection in progress. Please wait.", "");
@@ -335,6 +372,7 @@ impl<T: InvokeUiSession> Remote<T> {
                         }
                         _ = self.timer.tick() => {
                             if last_recv_time.elapsed() >= SEC30 {
+                                self.diagnostics.event("receive_timeout", "");
                                 self.handler.msgbox("error", "Connection Error", "Timeout", "");
                                 break;
                             }
@@ -376,6 +414,7 @@ impl<T: InvokeUiSession> Remote<T> {
                                     .and_then(|k| k.peer_silent_for())
                                     .map_or(false, |silent| silent >= KCP_PEER_SILENCE_LIMIT);
                             if peer_gone {
+                                self.diagnostics.event("peer_unresponsive", "");
                                 log::info!("Peer stopped answering, reconnecting");
                                 #[cfg(feature = "flutter")]
                                 self.handler.msgbox("restarting-show", "Connecting...", "Connection in progress. Please wait.", "");
@@ -444,6 +483,7 @@ impl<T: InvokeUiSession> Remote<T> {
                 }
             }
             Err(err) => {
+                self.diagnostics.event("transport_failed", "");
                 self.handler.on_establish_connection_error(err.to_string());
             }
         }
@@ -757,10 +797,12 @@ impl<T: InvokeUiSession> Remote<T> {
     async fn handle_msg_from_ui(&mut self, data: Data, peer: &mut Stream) -> bool {
         match data {
             Data::Close => {
+                self.diagnostics.event("local_close_requested", "");
                 self.send_close_reason(peer, "").await;
                 return false;
             }
             Data::Login((os_username, os_password, password, remember)) => {
+                self.diagnostics.event("credentials_submitted", "");
                 self.handler
                     .handle_login_from_ui(
                         os_username,
@@ -1697,14 +1739,27 @@ impl<T: InvokeUiSession> Remote<T> {
         if let Ok(msg_in) = Message::parse_from_bytes(&data) {
             match msg_in.union {
                 Some(message::Union::VideoFrame(vf)) => {
+                    self.diagnostics.video_received();
                     if !self.first_frame {
+                        self.diagnostics.advance(Phase::Decode);
+                        self.diagnostics.event(
+                            "first_video_received",
+                            &format!(",\"codec\":\"{:?}\",\"display\":{}", CodecFormat::from(&vf), vf.display),
+                        );
                         self.first_frame = true;
                         self.handler.close_success();
                         self.handler.adapt_size();
                         self.send_toggle_virtual_display_msg(peer).await;
                         self.send_toggle_privacy_mode_msg(peer).await;
                     }
-                    self.video_format = CodecFormat::from(&vf);
+                    let format = CodecFormat::from(&vf);
+                    if self.video_format != format {
+                        self.diagnostics.event(
+                            "video_codec",
+                            &format!(",\"codec\":\"{:?}\"", format),
+                        );
+                    }
+                    self.video_format = format;
 
                     let display = vf.display as usize;
                     if !self.video_threads.contains_key(&display) {
@@ -1720,7 +1775,9 @@ impl<T: InvokeUiSession> Remote<T> {
                             .ok();
                     } else {
                         let video_queue = thread.video_queue.read().unwrap();
-                        if video_queue.force_push(vf).is_some() {
+                        let overflow = video_queue.force_push(vf).is_some();
+                        self.diagnostics.queue(video_queue.len(), overflow);
+                        if overflow {
                             drop(video_queue);
                             self.handler.refresh_video(display as _);
                         } else {
@@ -1729,6 +1786,7 @@ impl<T: InvokeUiSession> Remote<T> {
                     }
                 }
                 Some(message::Union::Hash(hash)) => {
+                    self.diagnostics.event("authentication_challenge_received", "");
                     if !self
                         .handler
                         .handle_hash(
@@ -1749,11 +1807,23 @@ impl<T: InvokeUiSession> Remote<T> {
                     .union
                 {
                     Some(login_response::Union::Error(err)) => {
+                        self.diagnostics.event("authentication_rejected", "");
                         if !self.handler.handle_login_error(&err) {
                             return false;
                         }
                     }
                     Some(login_response::Union::PeerInfo(pi)) => {
+                        self.diagnostics.advance(Phase::AwaitVideo);
+                        self.diagnostics.event(
+                            "authentication_accepted",
+                            &format!(",\"macos\":{},\"display_count\":{}", pi.platform == "Mac OS", pi.displays.len()),
+                        );
+                        for (index, display) in pi.displays.iter().enumerate() {
+                            self.diagnostics.event(
+                                "remote_display",
+                                &format!(",\"display\":{},\"width\":{},\"height\":{}", index, display.width, display.height),
+                            );
+                        }
                         let peer_version = pi.version.clone();
                         let peer_platform = pi.platform.clone();
                         self.set_peer_info(&pi);
@@ -2477,6 +2547,12 @@ impl<T: InvokeUiSession> Remote<T> {
                     _ => {}
                 },
                 Some(message::Union::TestDelay(t)) => {
+                    if !t.from_client {
+                        self.diagnostics.event(
+                            "host_quality",
+                            &format!(",\"host_reported_delay_ms\":{},\"target_bitrate_kbps\":{}", t.last_delay, t.target_bitrate),
+                        );
+                    }
                     self.handler.handle_test_delay(t, peer).await;
                 }
                 Some(message::Union::AudioFrame(frame)) => {
@@ -2901,6 +2977,8 @@ impl<T: InvokeUiSession> Remote<T> {
             discard_queue: discard_queue.clone(),
         };
         let handler = self.handler.ui_handler.clone();
+        let diagnostics = self.diagnostics.clone();
+        let mut first_submission = true;
         crate::client::start_video_thread(
             self.handler.clone(),
             display,
@@ -2909,6 +2987,7 @@ impl<T: InvokeUiSession> Remote<T> {
             decode_fps,
             self.chroma.clone(),
             discard_queue,
+            self.diagnostics.clone(),
             move |display: usize,
                   data: &mut scrap::ImageRgb,
                   _texture: *mut c_void,
@@ -2919,6 +2998,13 @@ impl<T: InvokeUiSession> Remote<T> {
                 } else {
                     #[cfg(all(feature = "vram", feature = "flutter"))]
                     handler.on_texture(display, _texture);
+                }
+                if first_submission {
+                    first_submission = false;
+                    diagnostics.event(
+                        "first_frame_submitted",
+                        &format!(",\"display\":{},\"width\":{},\"height\":{},\"pixelbuffer\":{}", display, data.w, data.h, pixelbuffer),
+                    );
                 }
             },
         );

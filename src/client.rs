@@ -93,6 +93,7 @@ use crate::ui_session_interface::SessionPermissionConfig;
 
 pub use super::lang::*;
 
+pub mod diagnostics;
 mod login_method;
 
 #[cfg(not(target_os = "linux"))]
@@ -377,6 +378,7 @@ impl Client {
         token: &str,
         conn_type: ConnType,
         interface: impl Interface,
+        diagnostics: diagnostics::ConnectionDiagnostics,
     ) -> ResultType<(
         (
             Stream,
@@ -390,7 +392,7 @@ impl Client {
         debug_assert!(peer == interface.get_id());
         interface.update_direct(None);
         interface.update_received(false);
-        match Self::_start(peer, key, token, conn_type, interface.clone()).await {
+        match Self::_start(peer, key, token, conn_type, interface.clone(), diagnostics).await {
             Err(err) => {
                 let err_str = err.to_string();
                 if err_str.starts_with("Failed") {
@@ -422,6 +424,7 @@ impl Client {
         token: &str,
         conn_type: ConnType,
         interface: impl Interface,
+        diagnostics: diagnostics::ConnectionDiagnostics,
     ) -> ResultType<(
         (
             Stream,
@@ -438,6 +441,7 @@ impl Client {
         }
         // to-do: remember the port for each peer, so that we can retry easier
         if hbb_common::is_ip_str(peer) {
+            diagnostics.event("direct_ip_connect_started", "");
             return Ok((
                 (
                     connect_tcp_local(check_port(peer, RELAY_PORT + 1), None, CONNECT_TIMEOUT)
@@ -453,6 +457,7 @@ impl Client {
         }
         // Allow connect to {domain}:{port}
         if hbb_common::is_domain_port_str(peer) {
+            diagnostics.event("direct_domain_connect_started", "");
             return Ok((
                 (
                     connect_tcp_local(peer, None, CONNECT_TIMEOUT).await?,
@@ -472,6 +477,7 @@ impl Client {
         } else {
             (peer, "", key, token)
         };
+        diagnostics.event("rendezvous_selection_started", "");
         let (rendezvous_server, servers, contained) = if other_server.is_empty() {
             crate::get_rendezvous_server(1_000).await
         } else {
@@ -489,6 +495,8 @@ impl Client {
             }
         };
 
+        diagnostics.event("rendezvous_selection_finished", "");
+        diagnostics.event("transport_preflight_started", "");
         // Same relay gate as the v6 socket below: under any forced relay the v6 punch cannot
         // be used, so probing v6 reachability is wasted work on every such connection.
         if crate::get_ipv6_punch_enabled() && !interface.is_force_relay() {
@@ -540,6 +548,7 @@ impl Client {
             None
         };
         let has_webrtc_offerer = webrtc_offerer.is_some();
+        diagnostics.event("transport_preflight_finished", "");
         let fut = Self::_start_inner(
             peer.to_owned(),
             key.to_owned(),
@@ -553,6 +562,8 @@ impl Client {
             rendezvous_server.clone(),
             servers.clone(),
             contained,
+            diagnostics.clone(),
+            "preferred",
         );
         // The fallback request exists only to carry a TCP punch, so it is pointless once TCP
         // punch is off — it would reach `connect()` with nothing to try and just open a second
@@ -581,6 +592,8 @@ impl Client {
             rendezvous_server,
             servers,
             contained,
+            diagnostics,
+            "tcp_fallback",
         )
         .boxed();
         if has_webrtc_offerer {
@@ -807,6 +820,8 @@ impl Client {
         mut rendezvous_server: String,
         servers: Vec<String>,
         contained: bool,
+        diagnostics: diagnostics::ConnectionDiagnostics,
+        diagnostic_path: &'static str,
     ) -> ResultType<(
         (
             Stream,
@@ -822,6 +837,8 @@ impl Client {
         // the outer select_ok closes its pc instead of leaking it in SESSIONS. Disarmed via
         // into_inner() once the stream is adopted into a connection attempt.
         let mut webrtc_offerer = webrtc_offerer.map(OffererGuard::new);
+        let diagnostic_fields = format!(",\"path\":\"{}\"", diagnostic_path);
+        diagnostics.event("rendezvous_connect_started", &diagnostic_fields);
         let mut start = Instant::now();
         let mut socket = connect_tcp(&*rendezvous_server, CONNECT_TIMEOUT).await;
         debug_assert!(!servers.contains(&rendezvous_server));
@@ -843,6 +860,7 @@ impl Client {
         }
         log::info!("rendezvous server: {}", rendezvous_server);
         let mut socket = socket?;
+        diagnostics.event("rendezvous_connected", &diagnostic_fields);
         let mut my_addr = socket.local_addr();
         let mut signed_id_pk = Vec::new();
         let mut relay_server = "".to_owned();
@@ -977,6 +995,10 @@ impl Client {
         let mut webrtc_sdp_answer = String::new();
         let mut pending_webrtc_ice = Vec::<String>::new();
         'punch_attempts: for i in 1..=3 {
+            diagnostics.event(
+                "punch_attempt",
+                &format!("{},\"number\":{}", diagnostic_fields, i),
+            );
             log::info!(
                 "#{} {} punch attempt with {}, id: {}",
                 i,
@@ -1366,6 +1388,7 @@ impl Client {
                 format!("nat_type: {:?}", peer_nat_type)
             }
         );
+        diagnostics.event("punch_response_ready", &diagnostic_fields);
         Ok((
             Self::connect(
                 my_addr,
@@ -1388,6 +1411,8 @@ impl Client {
                 webrtc_bridge_stop,
                 allow_tcp_punch,
                 &punch_type,
+                diagnostics,
+                diagnostic_path,
             )
             .await?,
             (feedback, rendezvous_server),
@@ -1417,6 +1442,8 @@ impl Client {
         webrtc_bridge_stop: Option<oneshot::Sender<()>>,
         allow_tcp_punch: bool,
         punch_type: &str,
+        diagnostics: diagnostics::ConnectionDiagnostics,
+        diagnostic_path: &'static str,
     ) -> ResultType<(
         Stream,
         bool,
@@ -1427,6 +1454,8 @@ impl Client {
         // Guard the offerer for the whole of connect(): any early return — cancellation during the
         // awaits below, the relay override, or a secure_connection failure — closes its pc via the
         // guard's drop. Disarmed only once WebRTC is the confirmed winning, secured transport.
+        let diagnostic_fields = format!(",\"path\":\"{}\"", diagnostic_path);
+        diagnostics.event("peer_connect_started", &diagnostic_fields);
         let mut webrtc_guard = webrtc_offerer.map(OffererGuard::new);
         let direct_failures = interface.get_lch().read().unwrap().direct_failures;
         let mut connect_timeout = 0;
@@ -1551,6 +1580,7 @@ impl Client {
         // preferred outcome, not a violation.
         if (interface.is_force_relay() && typ != "WebRTC") || conn.is_err() {
             if !relay_server.is_empty() {
+                diagnostics.event("relay_fallback_started", &diagnostic_fields);
                 let switch_code = interface.get_switch_code();
                 conn = Self::request_relay(
                     peer_id,
@@ -1575,15 +1605,27 @@ impl Client {
             }
         }
         let mut conn = conn?;
+        diagnostics.event(
+            "peer_connected",
+            &format!(
+                "{},\"transport\":\"{}\",\"direct\":{}",
+                diagnostic_fields, typ, direct
+            ),
+        );
         log::info!(
             "{:?} used to establish {typ} connection with {} punch",
             start.elapsed(),
             punch_type
         );
+        diagnostics.event("secure_handshake_started", &diagnostic_fields);
         let res = Self::secure_connection(peer_id, signed_id_pk.clone(), key, &mut conn).await;
         let pk: Option<Vec<u8>> = match res {
             Ok(pk) => pk,
             Err(e) if typ == "WebRTC" && !relay_server.is_empty() => {
+                diagnostics.event(
+                    "secure_handshake_relay_fallback",
+                    &diagnostic_fields,
+                );
                 // WebRTC won the race but identity/DTLS binding failed; fall back to a freshly
                 // coordinated relay instead of failing the whole attempt. The guard is dropped
                 // first so the bad pc is closed promptly.
@@ -1648,6 +1690,7 @@ impl Client {
             }
         }
         log::debug!("{} punch secure_connection ok", punch_type);
+        diagnostics.event("secure_handshake_finished", &diagnostic_fields);
         Ok((conn, direct, pk, kcp, typ))
     }
 
@@ -3998,6 +4041,7 @@ pub fn start_video_thread<F, T>(
     fps: Arc<RwLock<Option<usize>>>,
     chroma: Arc<RwLock<Option<Chroma>>>,
     discard_queue: Arc<RwLock<bool>>,
+    diagnostics: diagnostics::ConnectionDiagnostics,
     video_callback: F,
 ) where
     F: 'static + FnMut(usize, &mut scrap::ImageRgb, *mut c_void, bool) + Send,
@@ -4043,7 +4087,18 @@ pub fn start_video_thread<F, T>(
                         let start = std::time::Instant::now();
                         let format = CodecFormat::from(&vf);
                         if video_handler.is_none() {
+                            diagnostics.event(
+                                "decoder_setup_started",
+                                &format!(",\"display\":{},\"codec\":\"{:?}\"", display, format),
+                            );
                             let mut handler = VideoHandler::new(format, display);
+                            diagnostics.event(
+                                "decoder_setup_finished",
+                                &format!(
+                                    ",\"display\":{},\"codec\":\"{:?}\",\"valid\":{}",
+                                    display, format, handler.decoder.valid()
+                                ),
+                            );
                             let record_state = session.lc.read().unwrap().record_state;
                             let record_permission = session.lc.read().unwrap().record_permission;
                             let id = session.lc.read().unwrap().id.clone();
@@ -4058,6 +4113,7 @@ pub fn start_video_thread<F, T>(
                             let format_changed = handler.decoder.format() != format;
                             match handler.handle_frame(vf, &mut pixelbuffer, &mut tmp_chroma) {
                                 Ok(true) => {
+                                    diagnostics.decoded(start.elapsed());
                                     video_callback(
                                         display,
                                         &mut handler.rgb,
@@ -4082,6 +4138,7 @@ pub fn start_video_thread<F, T>(
                                     );
                                 }
                                 Err(e) => {
+                                    diagnostics.decode_error();
                                     // This is a simple workaround.
                                     //
                                     // I only see the following error:

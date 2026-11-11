@@ -1,0 +1,24 @@
+name: RDALL diagnostics
+
+on:
+  push:
+    branches: [master, 'rdall/**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnostics:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Check diagnostic formatting
+        run: rustfmt --edition 2021 --check src/client/diagnostics.rs
+      - name: Test timing and concurrent decoder tracking
+        run: |
+          rustc --edition 2021 --test src/client/diagnostics.rs -o /tmp/rdall-diagnostics-tests
+          /tmp/rdall-diagnostics-tests
+      - name: Test log analysis
+        run: python3 -m unittest discover -s tools/rdall -p 'test_*.py'
